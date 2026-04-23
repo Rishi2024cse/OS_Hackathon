@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure E2EE Chat - Dashboard</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: #e0e0e0; display: flex; height: 100vh; margin: 0; }
+        .sidebar { width: 300px; background: #1e1e1e; border-right: 1px solid #333; display: flex; flex-direction: column; }
+        .sidebar-header { padding: 1.5rem; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
+        .user-list { flex-grow: 1; overflow-y: auto; padding: 1rem; }
+        .user-item { padding: 12px; margin-bottom: 8px; background: #2c2c2c; border-radius: 8px; cursor: pointer; transition: 0.2s; display: flex; align-items: center; }
+        .user-item:hover { background: #3d3d3d; }
+        .user-item.active { border-left: 4px solid #bb86fc; background: #3d3d3d; }
+        .chat-area { flex-grow: 1; display: flex; flex-direction: column; background: #121212; }
+        .chat-header { padding: 1rem 2rem; border-bottom: 1px solid #333; background: #1e1e1e; display: flex; align-items: center; justify-content: space-between; }
+        .messages { flex-grow: 1; overflow-y: auto; padding: 2rem; display: flex; flex-direction: column; gap: 1rem; }
+        .message { max-width: 60%; padding: 12px 16px; border-radius: 12px; line-height: 1.4; position: relative; }
+        .sent { align-self: flex-end; background: #bb86fc; color: #121212; border-bottom-right-radius: 2px; }
+        .received { align-self: flex-start; background: #2c2c2c; color: #e0e0e0; border-bottom-left-radius: 2px; }
+        .input-area { padding: 1.5rem; background: #1e1e1e; border-top: 1px solid #333; display: flex; gap: 1rem; }
+        input { flex-grow: 1; padding: 12px; background: #2c2c2c; border: 1px solid #333; border-radius: 6px; color: #fff; }
+        button { padding: 12px 24px; border: none; border-radius: 6px; background: #03dac6; color: #121212; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        button:hover { background: #01bca9; }
+        .loader { text-align: center; color: #777; font-size: 0.9rem; margin-top: 2rem; }
+        #logout-btn { background: #cf6679; padding: 6px 12px; color: #fff; font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <h3 id="current-username">Chat</h3>
+            <button id="logout-btn" onclick="logout()">Logout</button>
+        </div>
+        <div class="user-list" id="user-list">
+            <div class="loader">Loading contacts...</div>
+        </div>
+    </div>
+    <div class="chat-area" id="chat-area" style="display: none;">
+        <div class="chat-header">
+            <h2 id="active-user-title">Select a contact</h2>
+            <span id="blockchain-verif" style="font-size: 0.8rem; color: #03dac6; display: none;">Verified via Blockchain</span>
+        </div>
+        <div class="messages" id="messages"></div>
+        <div class="input-area">
+            <input type="text" id="message-input" placeholder="Type a secure message...">
+            <button onclick="sendMessage()">Send</button>
+        </div>
+    </div>
+
+    <script src="/static/crypto_utils.js"></script>
+    <script>
+        const token = localStorage.getItem('token');
+        const myUsername = localStorage.getItem('username');
+        const myUserId = parseInt(localStorage.getItem('user_id'));
+        
+        if (!token) window.location.href = '/';
+
+        document.getElementById('current-username').innerText = myUsername;
+
+        let activeContactId = null;
+        let activeContactPublicKey = null;
+        let usersMap = {};
+        let ws = null;
+        let myPublicKey = null;
+
+        /** 1. Fetch User List and map Public Keys **/
+        async function fetchUsers() {
+            const resp = await fetch('/users');
+            const users = await resp.json();
+            const list = document.getElementById('user-list');
+            list.innerHTML = "";
+            users.forEach(u => {
+                if (u.id === myUserId) {
+                    myPublicKey = u.public_key;
+                    return;
+                }
+                usersMap[u.id] = u;
+                const div = document.createElement('div');
+                div.className = 'user-item';
+                div.id = `user-${u.id}`;
+                div.innerText = u.username;
+                div.onclick = (e) => selectContact(u.id, div);
+                list.appendChild(div);
+            });
+        }
+
+        /** 2. Blockchain Identity Verification (Zero Trust) **/
+        async function verifyUserPublicKeyViaBlockchain(userId, username, expectedPublicKey) {
+            try {
+                const resp = await fetch('/blockchain');
+                const { chain, is_valid } = await resp.json();
+                
+                if (!is_valid) {
+                    console.error("BLOCKCHAIN ERROR: Ledger integrity compromised!");
+                    return false;
+                }
+
+                const userBlock = chain.find(b => b.data && b.data.username === username && b.data.user_id === userId);
+                
+                if (!userBlock) {
+                    console.error("BLOCKCHAIN ERROR: User not found in ledger");
+                    return false;
+                }
+                
+                if (userBlock.data.public_key !== expectedPublicKey) {
+                    console.error("SECURITY ALERT: DB Public Key does not match Blockchain Ledger!");
+                    return false;
+                }
+                return true;
+            } catch (e) {
+                console.error("Verification failed", e);
+                return false;
+            }
+        }
+
+        async function selectContact(contactId, element) {
+            document.querySelectorAll('.user-item').forEach(e => e.classList.remove('active'));
+            element.classList.add('active');
+            
+            activeContactId = contactId;
+            const contact = usersMap[contactId];
+            activeContactPublicKey = contact.public_key;
+            
+            document.getElementById('active-user-title').innerText = contact.username;
+            document.getElementById('chat-area').style.display = 'flex';
+            document.getElementById('blockchain-verif').style.display = 'none';
+
+            // Verify Identity via Blockchain before showing verification badge
+            const isVerified = await verifyUserPublicKeyViaBlockchain(contactId, contact.username, activeContactPublicKey);
+            if (isVerified) {
+                document.getElementById('blockchain-verif').style.display = 'inline';
+            }
+
+            fetchMessages(contactId);
+        }
+
+        /** 3. Fetch History (Decrypt with Local Private Key) **/
+        async function fetchMessages(contactId) {
+            const resp = await fetch(`/messages/${contactId}?token=${token}`);
+            const messages = await resp.json();
+            const msgBox = document.getElementById('messages');
+            msgBox.innerHTML = "";
+            
+            for (const msg of messages) {
+                renderMessage(msg);
+            }
+            msgBox.scrollTop = msgBox.scrollHeight;
+        }
+
+        async function renderMessage(msg) {
+            const msgBox = document.getElementById('messages');
+            const div = document.createElement('div');
+            div.className = `message ${msg.sender_id === myUserId ? 'sent' : 'received'}`;
+            
+            try {
+                // To View our own sent messages, we need our private key
+                // To View received messages, we need our private key
+                const myPrivKeyPEM = localStorage.getItem(`priv_key_${myUsername}`);
+                const privateKey = await CryptoUtils.importPrivateKey(myPrivKeyPEM);
+                
+                let encodedAESKeyToUnwrap;
+                try {
+                    const keys = JSON.parse(msg.encrypted_aes_key);
+                    encodedAESKeyToUnwrap = msg.sender_id === myUserId ? keys.sender : keys.receiver;
+                } catch(e) {
+                    // Fallback for older messages
+                    encodedAESKeyToUnwrap = msg.encrypted_aes_key;
+                }
+
+                const aesKey = await CryptoUtils.unwrapKey(encodedAESKeyToUnwrap, privateKey);
+                const decrypted = await CryptoUtils.decryptMessage(JSON.parse(msg.encrypted_message), aesKey);
+                div.innerText = decrypted;
+            } catch (e) {
+                console.error("Decryption failed", e);
+                div.innerText = "[Encrypted Content - Key Missing]";
+                div.style.fontStyle = "italic";
+            }
+            
+            msgBox.appendChild(div);
+        }
+
+        /** 4. Real-time WebSocket Messaging **/
+        function connectWS() {
+            ws = new WebSocket(`ws://${location.host}/ws?token=${token}`);
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.sender_id === activeContactId || msg.sender_id === myUserId) {
+                    renderMessage(msg);
+                    const msgBox = document.getElementById('messages');
+                    msgBox.scrollTop = msgBox.scrollHeight;
+                }
+            };
+        }
+
+        async function sendMessage() {
+            const text = document.getElementById('message-input').value;
+            if (!text || !activeContactId) return;
+
+            const contact = usersMap[activeContactId];
+            
+            // --- SECURITY: Verify Identity Again ---
+            const isVerified = await verifyUserPublicKeyViaBlockchain(activeContactId, contact.username, activeContactPublicKey);
+            if (!isVerified) {
+                alert("SECURITY CRITICAL: The recipient's identity could not be verified via the blockchain. Aborting message for your privacy.");
+                return;
+            }
+
+            // --- E2EE Logic ---
+            // 1. Generate random AES key for this message
+            const aesKey = await CryptoUtils.generateAESKey();
+            
+            // 2. Encrypt message with AES
+            const encryptedBody = await CryptoUtils.encryptMessage(text, aesKey);
+            
+            // 3. Wrap AES key with Recipient's RSA Public Key AND Sender's RSA Public Key
+            const recipientPublicKey = await CryptoUtils.importPublicKey(activeContactPublicKey);
+            const wrappedAESForReceiver = await CryptoUtils.wrapKey(aesKey, recipientPublicKey);
+            
+            const senderPublicKeyObj = await CryptoUtils.importPublicKey(myPublicKey);
+            const wrappedAESForSender = await CryptoUtils.wrapKey(aesKey, senderPublicKeyObj);
+
+            const payload = {
+                receiver_id: activeContactId,
+                encrypted_message: JSON.stringify(encryptedBody),
+                encrypted_aes_key: JSON.stringify({
+                    receiver: wrappedAESForReceiver,
+                    sender: wrappedAESForSender
+                })
+            };
+
+            ws.send(JSON.stringify(payload));
+            document.getElementById('message-input').value = "";
+        }
+
+        function logout() {
+            localStorage.clear();
+            window.location.href = '/';
+        }
+
+        fetchUsers();
+        connectWS();
+    </script>
+</body>
+</html>

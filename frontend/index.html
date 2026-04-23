@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure E2EE Chat - Register / Login</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: #e0e0e0; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .container { background: #1e1e1e; padding: 2rem; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); width: 100%; max-width: 400px; text-align: center; }
+        h1 { color: #bb86fc; margin-bottom: 1.5rem; }
+        input { width: 100%; padding: 12px; margin: 10px 0; background: #2c2c2c; border: 1px solid #333; border-radius: 6px; color: #fff; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; margin-top: 15px; border: none; border-radius: 6px; background: #bb86fc; color: #121212; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        button:hover { background: #9965f4; }
+        .toggle-link { margin-top: 15px; display: block; color: #03dac6; text-decoration: none; font-size: 0.9rem; cursor: pointer; }
+        #status { margin-top: 15px; font-size: 0.85rem; color: #cf6679; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 id="form-title">Login</h1>
+        <div id="auth-form">
+            <input type="text" id="username" placeholder="Username">
+            <input type="password" id="password" placeholder="Password">
+            <button id="submit-btn" onclick="handleAuth()">Login</button>
+            <p id="status"></p>
+            <a class="toggle-link" id="toggle-auth" onclick="toggleAuth()">Don't have an account? Register</a>
+        </div>
+    </div>
+
+    <script src="/static/crypto_utils.js"></script>
+    <script>
+        let isLogin = true;
+
+        function toggleAuth() {
+            isLogin = !isLogin;
+            document.getElementById('form-title').innerText = isLogin ? 'Login' : 'Register';
+            document.getElementById('submit-btn').innerText = isLogin ? 'Login' : 'Register & Generate Keys';
+            document.getElementById('toggle-auth').innerText = isLogin ? "Don't have an account? Register" : "Already have an account? Login";
+            document.getElementById('status').innerText = "";
+        }
+
+        async function handleAuth() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const status = document.getElementById('status');
+            
+            if (!username || !password) {
+                status.innerText = "Please fill all fields.";
+                return;
+            }
+
+            status.style.color = "#bb86fc";
+            status.innerText = isLogin ? "Logging in..." : "Generating E2EE Keys...";
+
+            if (isLogin) {
+                try {
+                    const resp = await fetch('/login', {
+                        method: 'POST',
+                        body: JSON.stringify({ username, password })
+                    });
+                    const result = await resp.json();
+                    if (resp.ok) {
+                        localStorage.setItem('token', result.access_token);
+                        localStorage.setItem('user_id', result.user_id);
+                        localStorage.setItem('username', result.username);
+                        window.location.href = '/chat';
+                    } else {
+                        status.style.color = "#cf6679";
+                        status.innerText = result.detail || "Login failed.";
+                    }
+                } catch (e) {
+                    status.innerText = "Connection error.";
+                }
+            } else {
+                // Register Flow
+                try {
+                    // 1. Generate RSA Keys for this user locally
+                    const keyPair = await CryptoUtils.generateKeyPair();
+                    const publicKeyPEM = await CryptoUtils.exportPublicKey(keyPair.publicKey);
+                    const privateKeyPEM = await CryptoUtils.exportPrivateKey(keyPair.privateKey);
+
+                    // 2. Save Private Key locally (only this browser can read messages)
+                    localStorage.setItem(`priv_key_${username}`, privateKeyPEM);
+
+                    // 3. Send Public Key to Server
+                    const resp = await fetch('/register', {
+                        method: 'POST',
+                        body: JSON.stringify({ username, password, public_key: publicKeyPEM })
+                    });
+                    const result = await resp.json();
+                    if (resp.ok) {
+                        status.style.color = "#03dac6";
+                        status.innerText = "Registration & Blockchain Mining Successful! You can now login.";
+                        toggleAuth();
+                    } else {
+                        status.style.color = "#cf6679";
+                        status.innerText = result.detail || "Registration failed.";
+                    }
+                } catch (e) {
+                    console.error(e);
+                    status.innerText = "Error generating keys or contacting server.";
+                }
+            }
+        }
+    </script>
+</body>
+</html>
